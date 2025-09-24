@@ -11,6 +11,7 @@ let globalSettings = {
   isEnabled: true,
   targetLoudness: -16,
 };
+let LoudnessMeter; // This will be assigned after the dynamic import.
 
 // Eine WeakMap, um den Überblick über verarbeitete Elemente und ihre Ressourcen zu behalten
 const processedElements = new WeakMap();
@@ -19,12 +20,18 @@ const processedElements = new WeakMap();
 (async () => {
   try {
     const src = chrome.runtime.getURL('lib/needles.js');
-    // Wichtig: 'LoudnessMeter' wird als globales Objekt verfügbar
-    await import(src);
+    // Dynamically import the module and extract the LoudnessMeter class.
+    const needlesModule = await import(src);
+    LoudnessMeter = needlesModule.LoudnessMeter;
+
+    if (!LoudnessMeter) {
+        throw new Error("LoudnessMeter class not found in the imported module.");
+    }
+
     console.log('needles.js library loaded successfully.');
     main(); // Starte die Hauptlogik erst nach dem Laden
   } catch (e) {
-    console.error('Failed to load needles.js library:', e);
+    console.error('Failed to load or initialize needles.js library:', e);
   }
 })();
 
@@ -90,6 +97,10 @@ function processMediaElement(element) {
   if (processedElements.has(element)) {
     return;
   }
+  // --- Fix for Race Condition (Bug #2) ---
+  // Immediately mark the element as being processed to prevent the observer
+  // from triggering a second processing call for the same element.
+  processedElements.set(element, { status: 'processing' });
 
   // console.log('Processing new media element:', element);
 
@@ -144,11 +155,13 @@ function processMediaElement(element) {
 
     meter.start();
 
-    // Speichere die Ressourcen in der WeakMap, um sie später bereinigen zu können
+    // Replace the placeholder with the actual resources for cleanup purposes.
     processedElements.set(element, { audioContext, meter });
 
   } catch (error) {
     console.error('Error processing media element:', error);
+    // If an error occurs, remove the element from the map so it can be retried.
+    processedElements.delete(element);
   }
 }
 
