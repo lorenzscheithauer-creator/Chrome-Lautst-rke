@@ -13,7 +13,6 @@ let globalSettings = {
 };
 let LoudnessMeter; // This will be assigned after the dynamic import.
 
-// Eine WeakMap, um den Überblick über verarbeitete Elemente und ihre Ressourcen zu behalten
 const processedElements = new WeakMap();
 
 // Lade die `needles`-Bibliothek dynamisch in den Seitenkontext
@@ -27,8 +26,7 @@ const processedElements = new WeakMap();
         throw new Error("LoudnessMeter class not found in the imported module.");
     }
 
-    // console.log('needles.js library loaded successfully.');
-    main(); // Starte die Hauptlogik erst nach dem Laden
+    main();
   } catch (e) {
     console.error('Failed to load or initialize needles.js library:', e);
   }
@@ -40,12 +38,8 @@ function main() {
   chrome.storage.sync.get(['isEnabled', 'targetLoudness'], (result) => {
     globalSettings = { ...globalSettings, ...result };
 
-    // --- Final Fix for Race Condition (InvalidStateError) ---
-    // First, process all elements already present on the page.
     document.querySelectorAll('video, audio').forEach(processMediaElement);
 
-    // THEN, start observing for future changes. This prevents the observer
-    // from firing for elements that are also being picked up by the initial scan.
     const observer = new MutationObserver(mutationCallback);
     observer.observe(document.body, { childList: true, subtree: true });
   });
@@ -63,7 +57,6 @@ function main() {
   });
 }
 
-// Callback-Funktion für den MutationObserver
 const mutationCallback = (mutationsList) => {
   for (const mutation of mutationsList) {
     mutation.addedNodes.forEach(node => {
@@ -85,72 +78,75 @@ const mutationCallback = (mutationsList) => {
   }
 };
 
-// Verarbeitet ein einzelnes Audio-/Video-Element
 function processMediaElement(element) {
-  // Step 1: Check if the element is already being processed or is fully processed.
-  if (processedElements.has(element)) {
-    return;
-  }
+    // FINAL FIX: Check and set an attribute directly on the element.
+    // This is faster and more reliable than just checking the WeakMap.
+    if (element.dataset.volumeGuardProcessed) {
+        return; // If the attribute already exists, cancel immediately.
+    }
+    element.dataset.volumeGuardProcessed = 'true'; // Set IMMEDIATELY to block all other calls.
 
-  // Step 2: Immediately mark the element as "processing" to prevent re-entry.
-  processedElements.set(element, { status: 'processing' });
+    // The WeakMap is still used for later resource management (cleanup).
+    processedElements.set(element, { status: 'processing' });
+    // console.log(`[DEBUG] Locking element:`, element);
 
-  try {
-    const audioContext = new AudioContext();
-    const sourceNode = audioContext.createMediaElementSource(element);
-    const gainNode = audioContext.createGain();
+    try {
+        const audioContext = new AudioContext();
+        const sourceNode = audioContext.createMediaElementSource(element);
+        const gainNode = audioContext.createGain();
+        const compressorNode = audioContext.createDynamicsCompressor();
 
-    const compressorNode = audioContext.createDynamicsCompressor();
-    compressorNode.threshold.value = -20;
-    compressorNode.knee.value = 30;
-    compressorNode.ratio.value = 4;
-    compressorNode.attack.value = 0.003;
-    compressorNode.release.value = 0.25;
+        compressorNode.threshold.value = -20;
+        compressorNode.knee.value = 30;
+        compressorNode.ratio.value = 4;
+        compressorNode.attack.value = 0.003;
+        compressorNode.release.value = 0.25;
 
-    sourceNode.connect(gainNode).connect(compressorNode).connect(audioContext.destination);
+        sourceNode.connect(gainNode).connect(compressorNode).connect(audioContext.destination);
 
-    const meter = new LoudnessMeter({
-      source: gainNode,
-    });
+        const meter = new LoudnessMeter({
+            source: gainNode,
+        });
 
-    meter.on('dataavailable', (event) => {
-      if (!globalSettings.isEnabled) {
-        gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.1);
-        return;
-      }
+        meter.on('dataavailable', (event) => {
+            if (!globalSettings.isEnabled) {
+                gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.1);
+                return;
+            }
 
-      const loudness = event.data.value;
-      if (loudness && loudness.momentary > -70) {
-        const error = globalSettings.targetLoudness - loudness.momentary;
-        const gainCorrection = Math.pow(10, error / 20);
-        gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.12);
-      } else {
-        gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.5);
-      }
-    });
+            const loudness = event.data.value;
+            if (loudness && loudness.momentary > -70) {
+                const error = globalSettings.targetLoudness - loudness.momentary;
+                const gainCorrection = Math.pow(10, error / 20);
+                gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.12);
+            } else {
+                gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.5);
+            }
+        });
 
-    meter.start();
+        meter.start();
 
-    // Step 3: Update the map entry with the actual resources, replacing the placeholder.
-    processedElements.set(element, { audioContext, meter, sourceNode, gainNode, compressorNode });
+        // If everything was successful, update the map entry with the real resources.
+        processedElements.set(element, { audioContext, meter, sourceNode, gainNode, compressorNode });
 
-  } catch (error) {
-    console.error('Error processing media element:', error);
-    // On error, remove the element from the map to allow a retry if needed.
-    processedElements.delete(element);
-  }
+    } catch (error) {
+        console.error('Error processing media element:', error);
+        // IMPORTANT: On error, remove the attribute again to allow reprocessing.
+        delete element.dataset.volumeGuardProcessed;
+        processedElements.delete(element);
+    }
 }
 
-// Bereinigt die Ressourcen eines entfernten Elements
 function cleanupMediaElement(element) {
     const resources = processedElements.get(element);
     if (resources && resources.status !== 'processing') {
-        // console.log('Cleaning up resources for element:', element.src || 'No Source');
         resources.meter.stop();
         resources.sourceNode.disconnect();
         resources.gainNode.disconnect();
         resources.compressorNode.disconnect();
         resources.audioContext.close();
         processedElements.delete(element);
+        // Also remove the attribute so it can be re-processed if it's re-added to the DOM.
+        delete element.dataset.volumeGuardProcessed;
     }
 }
