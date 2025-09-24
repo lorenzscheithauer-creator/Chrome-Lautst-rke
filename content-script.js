@@ -93,8 +93,10 @@ const mutationCallback = (mutationsList) => {
 
 // Verarbeitet ein einzelnes Audio-/Video-Element
 function processMediaElement(element) {
+  console.log(`[DEBUG] processMediaElement called for:`, element.src || 'No Source');
   // Verhindere doppelte Verarbeitung
   if (processedElements.has(element)) {
+    console.log(`[DEBUG] Element already processed, skipping.`, element.src || 'No Source');
     return;
   }
   // --- Fix for Race Condition (Bug #2) ---
@@ -102,7 +104,7 @@ function processMediaElement(element) {
   // from triggering a second processing call for the same element.
   processedElements.set(element, { status: 'processing' });
 
-  // console.log('Processing new media element:', element);
+  console.log(`[DEBUG] START processing for:`, element.src || 'No Source');
 
   try {
     const audioContext = new AudioContext();
@@ -122,10 +124,11 @@ function processMediaElement(element) {
 
     sourceNode.connect(gainNode).connect(compressorNode).connect(audioContext.destination);
 
-    // Initialisiere den LoudnessMeter von der 'needles'-Bibliothek
+    // --- Refactored LoudnessMeter Initialization ---
+    // The new "worker-less" library is initialized without the workerUri parameter.
     const meter = new LoudnessMeter({
-      source: gainNode, // Messe nach der Verstärkung
-      workerUri: chrome.runtime.getURL('lib/needles-worker.js'),
+      source: gainNode, // Measure after the main gain node
+      // No workerUri needed anymore
     });
 
     meter.on('dataavailable', (event) => {
@@ -159,7 +162,7 @@ function processMediaElement(element) {
     processedElements.set(element, { audioContext, meter });
 
   } catch (error) {
-    console.error('Error processing media element:', error);
+    console.error('[DEBUG] Error processing media element:', element.src || 'No Source', error);
     // If an error occurs, remove the element from the map so it can be retried.
     processedElements.delete(element);
   }
