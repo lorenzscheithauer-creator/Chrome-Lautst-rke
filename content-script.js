@@ -1,158 +1,154 @@
-console.log("Universal Volume Guard content script loaded.");
-
-// --- Global State ---
-const script = document.createElement('script');
-script.src = chrome.runtime.getURL('lib/needles.js');
-(document.head || document.documentElement).appendChild(script);
-
-const processedElements = new Map();
-let currentSettings = {
-  enabled: true,
-  targetLoudness: -16.0
+// Globale Variablen für Einstellungen
+let globalSettings = {
+  isEnabled: true,
+  targetLoudness: -16,
 };
 
-// --- Core Logic ---
+// Eine WeakMap, um den Überblick über verarbeitete Elemente und ihre Ressourcen zu behalten
+const processedElements = new WeakMap();
 
-/**
- * Applies the normalization logic based on loudness measurement.
- * @param {HTMLMediaElement} element The media element being processed.
- * @param {number} currentLoudness The measured momentary LUFS.
- */
-function applyNormalization(element, currentLoudness) {
-  if (!currentSettings.enabled || !processedElements.has(element)) {
-    return;
-  }
-
-  const { gainNode, audioContext } = processedElements.get(element);
-
-  // Ignore invalid or very low loudness values to prevent extreme amplification of silence.
-  if (!isFinite(currentLoudness) || currentLoudness < -70.0) {
-    // We can let the gain slowly drift back to 1.0 if we want.
-    // gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 1.0);
-    return;
-  }
-
-  const error = currentSettings.targetLoudness - currentLoudness; // Error in dB
-  const gainCorrection = Math.pow(10, error / 20); // Convert dB to linear gain factor
-
-  // Apply the correction smoothly. 0.1 is the time constant for the exponential change.
-  gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.1);
-}
-
-/**
- * Updates the state of all processed elements based on the current settings.
- */
-function updateAllElementsState() {
-    processedElements.forEach((resources, element) => {
-        if (!currentSettings.enabled) {
-            // If the extension is disabled, smoothly reset the gain to 1.0 (no change).
-            const { gainNode, audioContext } = resources;
-            gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.2);
-        }
-        // If it's enabled, the `applyNormalization` function will handle the gain.
-    });
-}
-
-/**
- * Processes a given HTMLMediaElement to attach the audio processing graph.
- * @param {HTMLMediaElement} element The media element to process.
- */
-function processMediaElement(element) {
-  if (processedElements.has(element)) return;
-  if (element.src && !element.crossOrigin) element.crossOrigin = "anonymous";
-
+// Lade die `needles`-Bibliothek dynamisch in den Seitenkontext
+(async () => {
   try {
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioContext.createMediaElementSource(element);
-    const gainNode = audioContext.createGain();
-    const compressorNode = audioContext.createDynamicsCompressor();
+    const src = chrome.runtime.getURL('lib/needles.js');
+    // Wichtig: 'LoudnessMeter' wird als globales Objekt verfügbar
+    await import(src);
+    console.log('needles.js library loaded successfully.');
+    main(); // Starte die Hauptlogik erst nach dem Laden
+  } catch (e) {
+    console.error('Failed to load needles.js library:', e);
+  }
+})();
 
-    source.connect(gainNode);
-    gainNode.connect(compressorNode);
-    compressorNode.connect(audioContext.destination);
 
-    const analysisChain = audioContext.createGain();
-    source.connect(analysisChain);
+// Hauptfunktion, die die Beobachtung startet
+function main() {
+  // Lade die initialen Einstellungen
+  chrome.storage.sync.get(['isEnabled', 'targetLoudness'], (result) => {
+    globalSettings = { ...globalSettings, ...result };
+    console.log('Initial settings loaded:', globalSettings);
 
-    const loudnessMeter = new window.LoudnessMeter({
-      source: analysisChain,
-      workerUri: chrome.runtime.getURL('lib/needles-worker.js'),
-      modes: ['momentary']
-    });
+    // Starte die Beobachtung des DOM
+    const observer = new MutationObserver(mutationCallback);
+    observer.observe(document.body, { childList: true, subtree: true });
 
-    loudnessMeter.on('dataavailable', (event) => {
-      if (event.data.mode === 'momentary') {
-        applyNormalization(element, event.data.value);
+    // Verarbeite bereits vorhandene Elemente
+    document.querySelectorAll('video, audio').forEach(processMediaElement);
+  });
+
+  // Lausche auf Einstellungsänderungen aus dem Popup
+  chrome.storage.onChanged.addListener((changes) => {
+    let settingsChanged = false;
+    if (changes.isEnabled) {
+      globalSettings.isEnabled = changes.isEnabled.newValue;
+      settingsChanged = true;
+    }
+    if (changes.targetLoudness) {
+      globalSettings.targetLoudness = changes.targetLoudness.newValue;
+      settingsChanged = true;
+    }
+    if (settingsChanged) {
+        console.log('Settings updated:', globalSettings);
+        // Zukünftig könnte man hier die laufende Verarbeitung anpassen
+    }
+  });
+}
+
+// Callback-Funktion für den MutationObserver
+const mutationCallback = (mutationsList) => {
+  for (const mutation of mutationsList) {
+    // Verarbeite neu hinzugefügte Elemente
+    mutation.addedNodes.forEach(node => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        if (node.matches('video, audio')) {
+          processMediaElement(node);
+        }
+        node.querySelectorAll('video, audio').forEach(processMediaElement);
       }
     });
 
-    loudnessMeter.start();
-    console.log('Successfully attached Audio Graph and LUFS meter to element:', element);
-
-    processedElements.set(element, { audioContext, source, gainNode, compressorNode, loudnessMeter });
-
-    // Apply initial state
-    updateAllElementsState();
-
-  } catch (error) {
-    console.error("U-V-G: Failed to create Web Audio graph.", error);
-  }
-}
-
-/**
- * Cleans up resources for a removed HTMLMediaElement.
- * @param {HTMLMediaElement} element The media element to clean up.
- */
-function cleanupMediaElement(element) {
-  if (!processedElements.has(element)) return;
-  console.log('Cleaning up resources for:', element);
-  const res = processedElements.get(element);
-  res.loudnessMeter.stop();
-  res.source.disconnect();
-  res.gainNode.disconnect();
-  res.compressorNode.disconnect();
-  res.audioContext.close();
-  processedElements.delete(element);
-}
-
-// --- Observers and Listeners ---
-
-const observer = new MutationObserver((mutations) => {
-  for (const mutation of mutations) {
-    mutation.addedNodes.forEach(node => {
-      if (node.nodeType !== 1) return;
-      if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') processMediaElement(node);
-      node.querySelectorAll('video, audio').forEach(processMediaElement);
-    });
+    // Bereinige Ressourcen von entfernten Elementen
     mutation.removedNodes.forEach(node => {
-      if (node.nodeType !== 1) return;
-      if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') cleanupMediaElement(node);
-      node.querySelectorAll('video, audio').forEach(cleanupMediaElement);
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        if (node.matches('video, audio')) {
+          cleanupMediaElement(node);
+        }
+        node.querySelectorAll('video, audio').forEach(cleanupMediaElement);
+      }
     });
   }
-});
-
-script.onload = () => {
-    console.log('Needles library loaded.');
-    setTimeout(() => document.querySelectorAll('video, audio').forEach(processMediaElement), 500);
-    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
-    else document.addEventListener('DOMContentLoaded', () => observer.observe(document.body, { childList: true, subtree: true }));
 };
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === 'settingsUpdated') {
-    Object.assign(currentSettings, request.settings);
-    updateAllElementsState();
-  } else if (request.type === 'getSettings') {
-    sendResponse(currentSettings);
+// Verarbeitet ein einzelnes Audio-/Video-Element
+function processMediaElement(element) {
+  // Verhindere doppelte Verarbeitung
+  if (processedElements.has(element)) {
+    return;
   }
-});
 
-// Fetch initial settings
-chrome.runtime.sendMessage({ type: 'getSettings' }, (settings) => {
-  if (chrome.runtime.lastError) console.error(chrome.runtime.lastError);
-  else if (settings) {
-    currentSettings = settings;
-    updateAllElementsState();
+  console.log('Processing new media element:', element);
+
+  try {
+    const audioContext = new AudioContext();
+    const sourceNode = audioContext.createMediaElementSource(element);
+    const gainNode = audioContext.createGain();
+
+    // DynamicsCompressorNode für bessere Qualität und zur Vermeidung von Clipping
+    const compressorNode = audioContext.createDynamicsCompressor();
+    // Fine-tuned parameters for a smoother, less intrusive compression.
+    // It acts as a safety limiter for peaks after the gain stage.
+    compressorNode.threshold.value = -5;  // dB - Start compressing only very loud signals.
+    compressorNode.knee.value = 30;       // dB - Make the compression curve very smooth.
+    compressorNode.ratio.value = 12;      // 12:1 Ratio - Strong compression for what gets through.
+    compressorNode.attack.value = 0.003;  // seconds - Fast attack to catch peaks.
+    compressorNode.release.value = 0.25;  // seconds - Standard release time.
+
+    sourceNode.connect(gainNode).connect(compressorNode).connect(audioContext.destination);
+
+    // Initialisiere den LoudnessMeter von der 'needles'-Bibliothek
+    const meter = new LoudnessMeter({
+      source: gainNode, // Messe nach der Verstärkung
+      workerUri: chrome.runtime.getURL('lib/needles-worker.js'),
+    });
+
+    meter.on('dataavailable', (event) => {
+      // Breche ab, wenn die Erweiterung deaktiviert ist
+      if (!globalSettings.isEnabled) {
+        // Setze die Verstärkung auf 1 (neutral) zurück
+        gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.1);
+        return;
+      }
+
+      const loudness = event.data.value;
+      if (loudness && loudness.momentary > -70) { // Ignoriere Stille
+        const error = globalSettings.targetLoudness - loudness.momentary;
+        const gainCorrection = Math.pow(10, error / 20);
+
+        // Apply the correction smoothly. A time constant of 0.15s is a good balance
+        // between responsiveness and avoiding audible "pumping".
+        gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.15);
+      }
+    });
+
+    meter.start();
+
+    // Speichere die Ressourcen in der WeakMap, um sie später bereinigen zu können
+    processedElements.set(element, { audioContext, meter });
+
+  } catch (error) {
+    console.error('Error processing media element:', error);
   }
-});
+}
+
+// Bereinigt die Ressourcen eines entfernten Elements
+function cleanupMediaElement(element) {
+    if (processedElements.has(element)) {
+        console.log('Cleaning up resources for element:', element);
+        const { audioContext, meter } = processedElements.get(element);
+
+        meter.stop();
+        audioContext.close(); // Gibt alle Ressourcen des AudioContext frei
+
+        processedElements.delete(element);
+    }
+}
