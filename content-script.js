@@ -20,7 +20,6 @@ const processedElements = new WeakMap();
 (async () => {
   try {
     const src = chrome.runtime.getURL('lib/needles.js');
-    // Dynamically import the module and extract the LoudnessMeter class.
     const needlesModule = await import(src);
     LoudnessMeter = needlesModule.LoudnessMeter;
 
@@ -28,7 +27,7 @@ const processedElements = new WeakMap();
         throw new Error("LoudnessMeter class not found in the imported module.");
     }
 
-    console.log('needles.js library loaded successfully.');
+    // console.log('needles.js library loaded successfully.');
     main(); // Starte die Hauptlogik erst nach dem Laden
   } catch (e) {
     console.error('Failed to load or initialize needles.js library:', e);
@@ -38,19 +37,13 @@ const processedElements = new WeakMap();
 
 // Hauptfunktion, die die Beobachtung startet
 function main() {
-  // Lade die initialen Einstellungen
   chrome.storage.sync.get(['isEnabled', 'targetLoudness'], (result) => {
     globalSettings = { ...globalSettings, ...result };
-
-    // Starte die Beobachtung des DOM
     const observer = new MutationObserver(mutationCallback);
     observer.observe(document.body, { childList: true, subtree: true });
-
-    // Verarbeite bereits vorhandene Elemente
     document.querySelectorAll('video, audio').forEach(processMediaElement);
   });
 
-  // Lausche auf Einstellungsänderungen aus dem Popup
   chrome.storage.onChanged.addListener((changes) => {
     let settingsChanged = false;
     if (changes.isEnabled) {
@@ -61,15 +54,12 @@ function main() {
       globalSettings.targetLoudness = changes.targetLoudness.newValue;
       settingsChanged = true;
     }
-    // The `applyNormalization` function will automatically use the new `globalSettings`
-    // on the next audio processing tick, so no further action is needed here.
   });
 }
 
 // Callback-Funktion für den MutationObserver
 const mutationCallback = (mutationsList) => {
   for (const mutation of mutationsList) {
-    // Verarbeite neu hinzugefügte Elemente
     mutation.addedNodes.forEach(node => {
       if (node.nodeType === Node.ELEMENT_NODE) {
         if (node.matches('video, audio')) {
@@ -78,8 +68,6 @@ const mutationCallback = (mutationsList) => {
         node.querySelectorAll('video, audio').forEach(processMediaElement);
       }
     });
-
-    // Bereinige Ressourcen von entfernten Elementen
     mutation.removedNodes.forEach(node => {
       if (node.nodeType === Node.ELEMENT_NODE) {
         if (node.matches('video, audio')) {
@@ -93,90 +81,70 @@ const mutationCallback = (mutationsList) => {
 
 // Verarbeitet ein einzelnes Audio-/Video-Element
 function processMediaElement(element) {
-  console.log(`[DEBUG] processMediaElement called for:`, element.src || 'No Source');
-  // Verhindere doppelte Verarbeitung
+  // Step 1: Check if the element is already being processed or is fully processed.
   if (processedElements.has(element)) {
-    console.log(`[DEBUG] Element already processed, skipping.`, element.src || 'No Source');
     return;
   }
-  // --- Fix for Race Condition (Bug #2) ---
-  // Immediately mark the element as being processed to prevent the observer
-  // from triggering a second processing call for the same element.
-  processedElements.set(element, { status: 'processing' });
 
-  console.log(`[DEBUG] START processing for:`, element.src || 'No Source');
+  // Step 2: Immediately mark the element as "processing" to prevent re-entry.
+  processedElements.set(element, { status: 'processing' });
 
   try {
     const audioContext = new AudioContext();
     const sourceNode = audioContext.createMediaElementSource(element);
     const gainNode = audioContext.createGain();
 
-    // DynamicsCompressorNode für bessere Qualität und zur Vermeidung von Clipping
     const compressorNode = audioContext.createDynamicsCompressor();
-    // --- Compressor Tuning (Phase 1) ---
-    // These parameters are set for a gentle, "musical" compression that evens out
-    // the audio without sounding "squashed". It acts more as a leveler than a hard limiter.
-    compressorNode.threshold.value = -20; // dB - Start compressing a bit earlier than just at the peaks.
-    compressorNode.knee.value = 30;       // dB - A high knee ensures a very soft transition into compression.
-    compressorNode.ratio.value = 4;       // 4:1 is a common, natural-sounding ratio.
-    compressorNode.attack.value = 0.003;  // seconds - Fast attack to catch transients.
-    compressorNode.release.value = 0.25;  // seconds - A standard release time.
+    compressorNode.threshold.value = -20;
+    compressorNode.knee.value = 30;
+    compressorNode.ratio.value = 4;
+    compressorNode.attack.value = 0.003;
+    compressorNode.release.value = 0.25;
 
     sourceNode.connect(gainNode).connect(compressorNode).connect(audioContext.destination);
 
-    // --- Refactored LoudnessMeter Initialization ---
-    // The new "worker-less" library is initialized without the workerUri parameter.
     const meter = new LoudnessMeter({
-      source: gainNode, // Measure after the main gain node
-      // No workerUri needed anymore
+      source: gainNode,
     });
 
     meter.on('dataavailable', (event) => {
-      // Breche ab, wenn die Erweiterung deaktiviert ist
       if (!globalSettings.isEnabled) {
-        // Setze die Verstärkung auf 1 (neutral) zurück
         gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.1);
         return;
       }
 
       const loudness = event.data.value;
-      // --- Behavior during silence (Phase 1) ---
-      if (loudness && loudness.momentary > -70) { // -70 LUFS is effectively silence.
+      if (loudness && loudness.momentary > -70) {
         const error = globalSettings.targetLoudness - loudness.momentary;
         const gainCorrection = Math.pow(10, error / 20);
-
-        // --- Smoothing optimization (Phase 1) ---
-        // A time constant of 0.12s is very responsive to sudden changes (like ads)
-        // while still being smooth enough to avoid audible artifacts in most content.
         gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.12);
       } else {
-        // If the content is silent, slowly reset the gain to 1.0 (neutral).
-        // This prevents the amplification of background noise after a quiet scene.
         gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.5);
       }
     });
 
     meter.start();
 
-    // Replace the placeholder with the actual resources for cleanup purposes.
-    processedElements.set(element, { audioContext, meter });
+    // Step 3: Update the map entry with the actual resources, replacing the placeholder.
+    processedElements.set(element, { audioContext, meter, sourceNode, gainNode, compressorNode });
 
   } catch (error) {
-    console.error('[DEBUG] Error processing media element:', element.src || 'No Source', error);
-    // If an error occurs, remove the element from the map so it can be retried.
+    console.error('Error processing media element:', error);
+    // On error, remove the element from the map to allow a retry if needed.
     processedElements.delete(element);
   }
 }
 
 // Bereinigt die Ressourcen eines entfernten Elements
 function cleanupMediaElement(element) {
-    if (processedElements.has(element)) {
-        // console.log('Cleaning up resources for element:', element);
-        const { audioContext, meter } = processedElements.get(element);
-
-        meter.stop();
-        audioContext.close(); // Gibt alle Ressourcen des AudioContext frei
-
+    const resources = processedElements.get(element);
+    if (resources && resources.status !== 'processing') {
+        // console.log('Cleaning up resources for element:', element.src || 'No Source');
+        resources.meter.stop();
+        resources.sourceNode.disconnect();
+        resources.gainNode.disconnect();
+        resources.compressorNode.disconnect();
+        resources.audioContext.close();
         processedElements.delete(element);
     }
 }
