@@ -16,15 +16,14 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.sync.set({ isEnabled: enableSwitch.checked });
   });
 
-  // Update the loudness value display as the slider moves
+  // Update the UI and save the setting in real-time as the slider moves.
   loudnessSlider.addEventListener('input', () => {
     const newLoudness = parseInt(loudnessSlider.value, 10);
-    loudnessValue.textContent = `${newLoudness} LUFS`;
-  });
 
-  // Save the new loudness value when the user releases the slider
-  loudnessSlider.addEventListener('change', () => {
-    const newLoudness = parseInt(loudnessSlider.value, 10);
+    // 1. Update the text label immediately.
+    loudnessValue.textContent = `${newLoudness} LUFS`;
+
+    // 2. Save the new value to storage immediately.
     chrome.storage.sync.set({ targetLoudness: newLoudness });
   });
 });

@@ -44,15 +44,16 @@ function main() {
     observer.observe(document.body, { childList: true, subtree: true });
   });
 
-  chrome.storage.onChanged.addListener((changes) => {
-    let settingsChanged = false;
-    if (changes.isEnabled) {
-      globalSettings.isEnabled = changes.isEnabled.newValue;
-      settingsChanged = true;
-    }
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace !== 'sync') return;
+
     if (changes.targetLoudness) {
       globalSettings.targetLoudness = changes.targetLoudness.newValue;
-      settingsChanged = true;
+      console.log(`[Volume Guard] Target Loudness updated to: ${globalSettings.targetLoudness} LUFS`);
+    }
+
+    if (changes.isEnabled) {
+      globalSettings.isEnabled = changes.isEnabled.newValue;
     }
   });
 }
