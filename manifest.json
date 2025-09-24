@@ -27,7 +27,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["lib/needles.js", "lib/needles-worker.js"],
+      "resources": ["lib/needles.js"],
       "matches": ["<all_urls>"]
     }
   ]

@@ -39,9 +39,15 @@ const processedElements = new WeakMap();
 function main() {
   chrome.storage.sync.get(['isEnabled', 'targetLoudness'], (result) => {
     globalSettings = { ...globalSettings, ...result };
+
+    // --- Final Fix for Race Condition (InvalidStateError) ---
+    // First, process all elements already present on the page.
+    document.querySelectorAll('video, audio').forEach(processMediaElement);
+
+    // THEN, start observing for future changes. This prevents the observer
+    // from firing for elements that are also being picked up by the initial scan.
     const observer = new MutationObserver(mutationCallback);
     observer.observe(document.body, { childList: true, subtree: true });
-    document.querySelectorAll('video, audio').forEach(processMediaElement);
   });
 
   chrome.storage.onChanged.addListener((changes) => {
