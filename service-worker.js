@@ -4,5 +4,5 @@ chrome.runtime.onInstalled.addListener(() => {
     isEnabled: true,
     targetLoudness: -16
   });
-  console.log('Universal Volume Guard: Standardeinstellungen gesetzt.');
+  // console.log('Universal Volume Guard: Standardeinstellungen gesetzt.');
 });

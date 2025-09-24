@@ -1,4 +1,12 @@
-// Globale Variablen für Einstellungen
+/**
+ * @file content-script.js
+ * @description This script is injected into every webpage to handle the core audio
+ * normalization functionality. It uses a MutationObserver to detect audio/video
+ * elements, attaches a Web Audio API graph to them, and uses the 'needles'
+ * library to perform real-time LUFS loudness measurement and normalization.
+ */
+
+// --- Global State ---
 let globalSettings = {
   isEnabled: true,
   targetLoudness: -16,
@@ -26,7 +34,6 @@ function main() {
   // Lade die initialen Einstellungen
   chrome.storage.sync.get(['isEnabled', 'targetLoudness'], (result) => {
     globalSettings = { ...globalSettings, ...result };
-    console.log('Initial settings loaded:', globalSettings);
 
     // Starte die Beobachtung des DOM
     const observer = new MutationObserver(mutationCallback);
@@ -47,10 +54,8 @@ function main() {
       globalSettings.targetLoudness = changes.targetLoudness.newValue;
       settingsChanged = true;
     }
-    if (settingsChanged) {
-        console.log('Settings updated:', globalSettings);
-        // Zukünftig könnte man hier die laufende Verarbeitung anpassen
-    }
+    // The `applyNormalization` function will automatically use the new `globalSettings`
+    // on the next audio processing tick, so no further action is needed here.
   });
 }
 
@@ -86,7 +91,7 @@ function processMediaElement(element) {
     return;
   }
 
-  console.log('Processing new media element:', element);
+  // console.log('Processing new media element:', element);
 
   try {
     const audioContext = new AudioContext();
@@ -95,13 +100,14 @@ function processMediaElement(element) {
 
     // DynamicsCompressorNode für bessere Qualität und zur Vermeidung von Clipping
     const compressorNode = audioContext.createDynamicsCompressor();
-    // Fine-tuned parameters for a smoother, less intrusive compression.
-    // It acts as a safety limiter for peaks after the gain stage.
-    compressorNode.threshold.value = -5;  // dB - Start compressing only very loud signals.
-    compressorNode.knee.value = 30;       // dB - Make the compression curve very smooth.
-    compressorNode.ratio.value = 12;      // 12:1 Ratio - Strong compression for what gets through.
-    compressorNode.attack.value = 0.003;  // seconds - Fast attack to catch peaks.
-    compressorNode.release.value = 0.25;  // seconds - Standard release time.
+    // --- Compressor Tuning (Phase 1) ---
+    // These parameters are set for a gentle, "musical" compression that evens out
+    // the audio without sounding "squashed". It acts more as a leveler than a hard limiter.
+    compressorNode.threshold.value = -20; // dB - Start compressing a bit earlier than just at the peaks.
+    compressorNode.knee.value = 30;       // dB - A high knee ensures a very soft transition into compression.
+    compressorNode.ratio.value = 4;       // 4:1 is a common, natural-sounding ratio.
+    compressorNode.attack.value = 0.003;  // seconds - Fast attack to catch transients.
+    compressorNode.release.value = 0.25;  // seconds - A standard release time.
 
     sourceNode.connect(gainNode).connect(compressorNode).connect(audioContext.destination);
 
@@ -120,13 +126,19 @@ function processMediaElement(element) {
       }
 
       const loudness = event.data.value;
-      if (loudness && loudness.momentary > -70) { // Ignoriere Stille
+      // --- Behavior during silence (Phase 1) ---
+      if (loudness && loudness.momentary > -70) { // -70 LUFS is effectively silence.
         const error = globalSettings.targetLoudness - loudness.momentary;
         const gainCorrection = Math.pow(10, error / 20);
 
-        // Apply the correction smoothly. A time constant of 0.15s is a good balance
-        // between responsiveness and avoiding audible "pumping".
-        gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.15);
+        // --- Smoothing optimization (Phase 1) ---
+        // A time constant of 0.12s is very responsive to sudden changes (like ads)
+        // while still being smooth enough to avoid audible artifacts in most content.
+        gainNode.gain.setTargetAtTime(gainCorrection, audioContext.currentTime, 0.12);
+      } else {
+        // If the content is silent, slowly reset the gain to 1.0 (neutral).
+        // This prevents the amplification of background noise after a quiet scene.
+        gainNode.gain.setTargetAtTime(1.0, audioContext.currentTime, 0.5);
       }
     });
 
@@ -143,7 +155,7 @@ function processMediaElement(element) {
 // Bereinigt die Ressourcen eines entfernten Elements
 function cleanupMediaElement(element) {
     if (processedElements.has(element)) {
-        console.log('Cleaning up resources for element:', element);
+        // console.log('Cleaning up resources for element:', element);
         const { audioContext, meter } = processedElements.get(element);
 
         meter.stop();
