@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Universal Volume Guard",
+  "version": "1.0",
+  "description": "Normalisiert die Audio-Lautstärke über alle Tabs für ein konsistentes Hörerlebnis.",
+  "permissions": ["storage"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/needles.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
